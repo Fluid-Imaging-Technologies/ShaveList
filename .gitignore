@@ -16,12 +16,6 @@
 *.log
 *.opensdf
 *.ldr
-*/Debug/*
-*/Release/*
-*/ipch/*
-*/debug/
-*/release/
-*/Debug/*
-*/Release/*
-*/MSI/*
-*/EXE/*
+ipch/*
+Debug/*
+Release/*
