@@ -9,7 +9,8 @@
 void set_desription(HWND hDlg);
 bool choose_src_list(HWND hDlg);
 bool run(HWND hDlg);
-bool shave(HWND hDlg, int max_particles, FILE *fin, FILE *fout);
+int count_lines_in_file(HWND hDlg, const char *filename);
+bool shave(HWND hDlg, int line_count, int max_particles, FILE *fin, FILE *fout);
 bool copy_context(FILE *fin, FILE *fout);
 int* generate_keep_list(int *num_to_keep, int total, unsigned int seed);
 BOOL CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -186,7 +187,7 @@ bool run(HWND hDlg)
 	char src[MAX_PATH], dst[MAX_PATH], dst_name[MAX_PATH], error[2 * MAX_PATH];
 	char *p;
 	FILE *fin, *fout;
-	int max_particles;
+	int max_particles, line_count;
 	bool result;
 	
 	max_particles = GetDlgItemInt(hDlg, IDC_MAX_PARTICLES, NULL, FALSE);
@@ -237,6 +238,17 @@ bool run(HWND hDlg)
 		}
 	}
 	
+	line_count = count_lines_in_file(hDlg, src);
+
+	if (line_count < 0) {
+		// error already shown
+		return false;
+	}
+	else if (line_count < 2) {
+		MessageBox(hDlg, "Source file line count is too small to believe", "Error", MB_OK);
+		return false;
+	}
+
 	if (fopen_s(&fin, src, "rb")) {
 		MessageBox(hDlg, "Error opening original file.", "Error", MB_OK);
 		return false;
@@ -249,8 +261,8 @@ bool run(HWND hDlg)
 	}
 
 	SetCursor(LoadCursor(NULL, IDC_WAIT));
-	
-	result = shave(hDlg, max_particles, fin, fout);
+
+	result = shave(hDlg, line_count, max_particles, fin, fout);
 	
 	fclose(fin);
 	fclose(fout);
@@ -336,27 +348,12 @@ bool copy_context(FILE *fin, FILE *fout)
   =======================================================================================
   =======================================================================================
 */
-bool shave(HWND hDlg, int max_particles, FILE *fin, FILE *fout)
+bool shave_v2_v16(HWND hDlg, int version, int line_count, int max_particles, FILE *fin, FILE *fout)
 {
 	char line[2048];
-	int version, num_particles, num_to_keep;
+	int num_particles, num_to_keep;
 	int *keep_list, counter, written;
 	unsigned int seed;
-
-	memset(line, 0, sizeof(line));
-
-	if (!fgets(line, 32, fin)) {
-		MessageBox(hDlg, "Error reading list file version.", "Error", MB_OK);
-		return false;
-	}
-
-	version = atoi(line);
-
-	if (version < 2 || version > 16) {
-		MessageBox(hDlg, "ShaveList currently only supports list file versions 2 - 16.", 
-			"Unsupported Version", MB_OK);
-		return false;
-	}
 
 	memset(line, 0, sizeof(line));
 
@@ -421,6 +418,152 @@ bool shave(HWND hDlg, int max_particles, FILE *fin, FILE *fout)
   =======================================================================================
   =======================================================================================
 */
+int get_field_count(char *field_count_line)
+{
+	char *p;
+
+	p = strrchr(field_count_line, '|');
+
+	if (!p)
+		return 0;
+
+	p++;
+
+	return atoi(p);
+}
+
+/*
+  =======================================================================================
+  =======================================================================================
+*/
+bool shave_v17(HWND hDlg, int version, int line_count, int max_particles, FILE *fin, FILE *fout)
+{
+	char line[2048];
+	int num_particles, num_to_keep, num_fields;
+	int *keep_list, counter, written;
+	unsigned int seed;
+
+	memset(line, 0, sizeof(line));
+
+	if (!fgets(line, 32, fin)) {
+		MessageBox(hDlg, "Error reading field count from list file.",
+			"Error", MB_OK);
+		return false;
+	}
+
+	num_fields = get_field_count(line);
+
+	if (num_fields < 10) {
+		MessageBox(hDlg, "Suspiciously low field count in list file. Not processing.", "Error", MB_OK);
+		return false;
+	}
+	
+	if (num_fields + 2 >= line_count) {
+		MessageBox(hDlg, "More fields then lines in file. Not processing.", "Error", MB_OK);
+		return false;
+	}
+
+	num_particles = line_count - (num_fields + 2);
+
+	num_to_keep = max_particles;
+
+	seed = GetDlgItemInt(hDlg, IDC_RAND_SEED, NULL, FALSE);
+
+	if (seed == 0) {
+		seed = 1;
+	}
+
+	keep_list = generate_keep_list(&num_to_keep, num_particles, seed);
+
+	if (!keep_list) {
+		MessageBox(hDlg, "Internal error allocating memory.", "Error", MB_OK);
+		return false;
+	}
+
+	sprintf_s(line, sizeof(line), "%03d\nnum-fields|%d\n", version, num_fields);
+	
+	if (fputs(line, fout) < 0) {
+		MessageBox(hDlg, "Error writing output file", "Error", MB_OK);
+		return false;
+	}
+
+	// write out the fields
+	for (int i = 0; i < num_fields; i++) {
+		if (!fgets(line, sizeof(line), fin)) {
+			if (ferror(fin)) {
+				MessageBox(hDlg, "Error reading input file", "Error", MB_OK);
+				return false;
+			}
+		}
+
+		if (fputs(line, fout) < 0) {
+			MessageBox(hDlg, "Error writing output file", "Error", MB_OK);
+			return false;
+		}
+	}
+
+	counter = 0;
+	written = 0;
+
+	while (!feof(fin)) {
+		if (!fgets(line, sizeof(line), fin)) {
+			if (ferror(fin)) {
+				MessageBox(hDlg, "Error reading input file", "Error", MB_OK);
+				return false;
+			}
+		}
+
+		if (keep_list[counter++]) {
+			if (fputs(line, fout) < 0) {
+				MessageBox(hDlg, "Error writing output file", "Error", MB_OK);
+				return false;
+			}
+
+			if (++written >= num_to_keep) {
+				break;
+			}
+		}
+	}
+
+	delete [] keep_list;
+
+	return true;
+}
+
+/*
+  =======================================================================================
+  =======================================================================================
+*/
+bool shave(HWND hDlg, int line_count, int max_particles, FILE *fin, FILE *fout)
+{
+	char line[64];
+	int version;
+
+	memset(line, 0, sizeof(line));
+
+	if (!fgets(line, 32, fin)) {
+		MessageBox(hDlg, "Error reading list file version.", "Error", MB_OK);
+		return false;
+	}
+
+	version = atoi(line);
+
+	if (version < 2 || version > 17) {
+		MessageBox(hDlg, "ShaveList currently only supports list file versions 2 - 17.", 
+			"Unsupported Version", MB_OK);
+		return false;
+	}
+
+	if (version == 17)
+		return shave_v17(hDlg, version, line_count, max_particles, fin, fout);
+	else
+		return shave_v2_v16(hDlg, version, line_count, max_particles, fin, fout);
+}
+
+/*
+  =======================================================================================
+  =======================================================================================
+*/
 int* generate_keep_list(int *num_to_keep, int total, unsigned int seed)
 {
 	int *keepers, n, i, j;
@@ -444,7 +587,7 @@ int* generate_keep_list(int *num_to_keep, int total, unsigned int seed)
 		*num_to_keep = total;		
 	}
 	else {
-		keeper_cutoff = (double)(*num_to_keep) / (double) total;	
+		keeper_cutoff = (double)(*num_to_keep) / (double) total;
 	}
 
 	keepers = new int[total];
@@ -543,3 +686,66 @@ bool file_exists(const char *filename)
 	return false;
 }
 
+/*
+  =======================================================================================
+  Only use for files less then 4GB
+  =======================================================================================
+*/
+unsigned long get_file_size(const char *filename)
+{
+	WIN32_FILE_ATTRIBUTE_DATA fileInfo;
+
+	if (filename && *filename) {
+		if (GetFileAttributesEx(filename, GetFileExInfoStandard, &fileInfo)) {
+			return fileInfo.nFileSizeLow;
+		}
+	}
+
+	return 0;
+}
+
+/*
+  =======================================================================================
+  =======================================================================================
+*/
+int count_lines_in_file(HWND hDlg, const char *src)
+{
+	int line_count;
+	FILE *fin;
+	char *line;
+
+	line = new char[2048];
+
+	if (!line) {
+		MessageBox(hDlg, "Error allocating buffer memory.", "Memory", MB_OK);
+		return -1;
+	}
+
+	memset(line, 0, 2048);
+
+	if (fopen_s(&fin, src, "rb")) {
+		MessageBox(hDlg, "Error opening original file.", "Error", MB_OK);
+		delete [] line;
+		return -1;
+	}
+
+	line_count = 0;
+
+	while (!feof(fin)) {
+		if (!fgets(line, 2040, fin)) {
+			if (ferror(fin)) {
+				MessageBox(hDlg, "Error reading input file", "Error", MB_OK);
+				line_count = -1;
+				break;
+			}
+		}
+
+		line_count++;
+	}
+
+	delete [] line;
+
+	fclose(fin);
+
+	return line_count;
+}
